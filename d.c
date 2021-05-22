@@ -56,6 +56,9 @@ typedef struct regbuf {
 }regbuf_t;
 
 
+/* struct accepted by eval().
+ * returned by parse()
+ */
 typedef struct {
 	char cmd;
 	node_t *from;
@@ -74,21 +77,20 @@ node_t *gbl_current_node;
 long gbl_current_ptr;
 
 
-typedef struct {
+struct {
 	char *filename;
 	bool saved;
 	char *cmd;
 	bool fromfile;
-}state_t;
-state_t state;
+}state;
 
 /* Mark array */
 node_t *gbl_marks[MARKLIM];
 
 /** List **/
 node_t *ll_add(node_t *head, char *s, int at);
-node_t *ll_add_begin(node_t *head, char *s);
-node_t *ll_add_end(node_t *head, char *s);
+node_t *ll_add_begin(const char *s);
+node_t *ll_add_end(const char *s);
 node_t *ll_remove(node_t *head, int at);
 node_t *ll_new_node(char *s);
 node_t * ll_at(int at);
@@ -97,7 +99,8 @@ node_t * ll_prev_node(node_t *node, int n);
 node_t * ll_next_node(node_t *node, int n);
 /* For debugging */
 void ll_print(node_t *head); 
-node_t *ll_add_node(node_t *node, char *s);
+node_t *ll_add_node(node_t *node, const char *s);
+node_t *ll_make_node(node_t *p, const char *s, node_t *n);
 
 /* parse routines & eval routines */
 eval_t * parse(char *exp, eval_t *ev);
@@ -147,88 +150,53 @@ void ll_print(node_t *head) {
 	}
 }
 
-node_t *ll_add(node_t *head, char *s, int at) {
-	state.saved = false;
-	if (head == NULL || at == 0) {
-		return ll_add_begin(gbl_head_node, s);
-	}
-
-	node_t *newnode = ll_new_node(s);
-
-	if (at == gbl_len) {
-		return ll_add_end(gbl_tail_node, s);
-	}
-	node_t *current = head;
-	for (int i = 0; current->next != NULL; ++i, current = current->next) {
-		if (i == at) {
-			newnode->prev = current->prev;
-			newnode->next = current;
-			current->prev->next = newnode;
-			current->prev = newnode;
-			gbl_current_ptr = i;
-			break;
-		}
-	}
-	gbl_len++;
-	return newnode;
-}
-
-node_t *ll_new_node(char *s) {
-	node_t *node = (node_t *) calloc(1, sizeof(node_t));
-
-	node->s = (char *) calloc(strlen(s), sizeof(char));
-	strcpy(node->s, s);
-
-	node->next = NULL;
-	node->prev = NULL;
-	return node;
-}
-
 void ll_free_node(node_t **node) {
-	free((node_t *) *node);
+	free(*node);
 	(*node) = NULL;
 }
 
-node_t *ll_add_begin(node_t *head, char *s) {
+node_t *ll_make_node(node_t *p, const char *s, node_t *n) {
+	node_t *node = calloc(1, sizeof(node_t));
+	size_t sz = strlen(s);
+	node->s = calloc(sz, sizeof(char));
+	strncpy(node->s, s, sz);
+	node->next = n;
+	node->prev = p;
+	return node;
+}
+
+node_t *ll_add_begin(const char *s) {
 	state.saved = false;
-	if (s == NULL)
-		die(__FILE__, __LINE__, "ll_add_begin", "Empty data string");
-
-	node_t *newnode = ll_new_node(s);
-
-	if (head == NULL) {
-		gbl_head_node = gbl_current_node = gbl_tail_node = newnode;
+	node_t *newnode;
+	if (!gbl_head_node) {
+ 		newnode = ll_make_node(NULL, s, NULL);
+		gbl_head_node = gbl_tail_node = gbl_current_node = newnode;
 	}
-	else if (head != NULL) {
-		newnode->next = head;
-		head->prev = newnode;
+	else {
+		newnode = ll_make_node(NULL, s, gbl_head_node);
+		newnode->next = gbl_head_node;
+		gbl_head_node->prev = newnode;
 		gbl_head_node = newnode;
-		gbl_current_node = newnode;
 	}
 	gbl_len++;
-	gbl_current_ptr = 0;
 	return newnode;
 }
 
-node_t *ll_add_end(node_t *tail, char *s) {
+node_t *ll_add_end(const char *s) {
 	state.saved = false;
-	if (s == NULL)
-		die(__FILE__, __LINE__, "ll_add_end", "Empty data string");
 
-	if (tail == NULL) {
-		return ll_add_begin(tail, s);
+	node_t *newnode;
+	if (!gbl_tail_node) {
+		return ll_add_begin(s);
 	}
-	else if (tail != NULL) {
-		node_t *newnode = ll_new_node(s);
-		tail->next = newnode;
-		newnode->prev = tail;
+	else {
+		newnode = ll_make_node(gbl_tail_node, s, NULL);
+		newnode->prev = gbl_tail_node;
+		gbl_tail_node->next = newnode;
 		gbl_tail_node = newnode;
-		gbl_len++;
-		gbl_current_ptr = gbl_len;
-		return newnode;
 	}
-	die(__FILE__, __LINE__, "ll_add_end", "No viable selection");
-	return NULL;
+	gbl_len++;
+	return newnode;
 }
 
 node_t *ll_remove(node_t *head, int at) {
@@ -403,7 +371,7 @@ node_t * io_load_file(FILE *fp) {
 	node_t *head = NULL;
 
 	while ((getline(&line, &linecap, fp)) > 0) {
-		head = ll_add_end(head, line);
+		head = ll_add_end(line);
 		total_lines_read++;
 	}
 
@@ -710,22 +678,24 @@ node_t *ll_link_node(node_t *p, node_t *c, node_t *n) {
 }
 	
 
-node_t *ll_add_node(node_t *node, char *s) {
+node_t *ll_add_node(node_t *node, const char *s) {
 	state.saved = false;
-	node_t * newnode = ll_new_node(s);
 
+	node_t * newnode;
 	if (node == gbl_head_node) {
-		return ll_add_begin(gbl_head_node, s);
+		return ll_add_begin(s);
 	}
 	else if (node == gbl_tail_node) {
-		return ll_add_end(gbl_tail_node, s);
+		return ll_add_end(s);
 	}
 	else {
-		ll_link_node(node, newnode, node->next);
+		node_t *prv = node->prev;
+		newnode = ll_make_node(prv, s, node);
+		prv->next = newnode;
+		node->prev = newnode;	
 		gbl_len++;
-		gbl_current_ptr = ll_at_i(newnode->next);
-		gbl_current_node = newnode->next;
-		return gbl_current_node;
+		gbl_current_node = newnode;
+		return newnode->next;
 	}
 }
 
