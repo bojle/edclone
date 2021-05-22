@@ -62,7 +62,7 @@ typedef struct regbuf {
 typedef struct {
 	char cmd;
 	node_t *from;
-	int to;
+	node_t *to;
 	char *rest;
 	char mark;
 	char *regex;	
@@ -74,11 +74,6 @@ long gbl_len;
 node_t *gbl_head_node;
 node_t *gbl_tail_node;
 node_t *gbl_current_node;
-long gbl_current_ptr;
-
-#define set_gbl_head(node) ( gbl_head_node = node )
-#define set_gbl_tail(node) ( gbl_tail_node = node )
-#define set_gbl_current(node) ( gbl_current_node = node )
 
 struct {
 	char *filename;
@@ -118,10 +113,11 @@ eval_t *parse_address(eval_t *ev, char *addr);
 
 void ed_save(char *filename, char *cmd, bool quit, bool append);
 void ed_quit(bool force);
-void ed_subs(node_t *from, int to, char *regex, char *rest);
-void ed_print(node_t *from, int to);
+void ed_subs(node_t *from, node_t *to, char *regex, char *rest);
+void ed_print(node_t *from, node_t *to, bool numbrd);
 void ed_read(char *filename, char *cmd, node_t *from);
-void ed_join(node_t *from, int to);
+void ed_join(node_t *from, node_t *to);
+node_t *ed_delete(node_t *from, node_t *to);
 
 void die(char *file, int line, char *fn, char *cause);
 void io_err(const char *fmt, ...);
@@ -236,9 +232,9 @@ node_t *ll_remove_begin() {
 	}
 	
 	node_t *rmnode = gbl_head_node;
-	set_gbl_head(gbl_head_node->next);
+	gbl_head_node = gbl_head_node->next;
 	ll_free_node(&rmnode);
-	set_gbl_current(gbl_head_node);
+	gbl_current_node = gbl_head_node;
 	return gbl_head_node;
 }
 
@@ -249,9 +245,9 @@ node_t *ll_remove_end() {
 	}
 
 	node_t *rmnode = gbl_tail_node;
-	set_gbl_tail(gbl_tail_node->prev);
+	gbl_tail_node = gbl_tail_node->prev;
 	ll_free_node(&rmnode);
-	set_gbl_current(gbl_tail_node);
+	gbl_current_node = gbl_tail_node;
 	return gbl_tail_node;
 }
 
@@ -268,7 +264,7 @@ node_t * ll_remove_node(node_t * node) {
 		node_t *front = node->next;
 		front->prev = back;
 		back->next = front;
-		set_gbl_current(front);
+		gbl_current_node = front;
 		gbl_len++;
 		ll_free_node(&node);
 		return front;
@@ -283,19 +279,6 @@ node_t * ll_at(int at) {
 		}
 	}
 	return NULL;
-}
-
-int ll_at_i(node_t *node) {
-	node_t *current = gbl_head_node;
-	int i = 0;
-	while (current != NULL) {
-		if (current == node) {
-			return i;
-		}
-		++i;
-		current = current->next;
-	}
-	return -1;
 }
 
 void ll_free() {
@@ -477,17 +460,17 @@ eval_t *parse_address(eval_t *ev, char *addr) {
 	bool commapassed = false;
 	while (addr < naddr) {
 		if (*addr == '.') {
-			if (commapassed) { ev->to = gbl_current_ptr; }
+			if (commapassed) { ev->to = gbl_current_node; }
 			else { ev->from = gbl_current_node; }
 		}
 		else if (*addr == '$') {
-			if (commapassed) { ev->to = gbl_len; }
+			if (commapassed) { ev->to = gbl_tail_node; }
 			else { ev->from = gbl_tail_node; }
 		}
 		else if (*addr == ',') {
 			if (size == 1) {
 				ev->from = gbl_head_node;
-				ev->to = gbl_len;
+				ev->to = gbl_tail_node;
 			}
 			else {
 				commapassed = true;
@@ -500,7 +483,7 @@ eval_t *parse_address(eval_t *ev, char *addr) {
 			}
 
 			if (commapassed) {
-				ev->to = gbl_current_ptr - num;
+				ev->to = ll_prev_node(gbl_current_node, num);
 		   	}
 			else {
 				ev->from = ll_prev_node(gbl_current_node, num);
@@ -514,7 +497,7 @@ eval_t *parse_address(eval_t *ev, char *addr) {
 			}
 
 			if (commapassed) {
-				ev->to = gbl_current_ptr + num;
+				ev->to = ll_next_node(gbl_current_node, num);
 			}
 			else {
 				ev->from = ll_next_node(gbl_current_node, num);
@@ -524,7 +507,7 @@ eval_t *parse_address(eval_t *ev, char *addr) {
 		else if (isdigit(*addr)) {
 			long num = strtol(addr, &addr, 10);
 			if (commapassed) {
-				ev->to = num;
+				ev->to = ll_at(num);
 			}
 			else {
 				ev->from = ll_at(num);
@@ -533,7 +516,7 @@ eval_t *parse_address(eval_t *ev, char *addr) {
 		}
 		else if (*addr == ';') {
 			ev->from = gbl_current_node;
-			ev->to = gbl_len;
+			ev->to = gbl_tail_node;
 		}
 		else if (*addr == '/') {
 			char *start = addr+1;
@@ -557,7 +540,7 @@ eval_t *parse_address(eval_t *ev, char *addr) {
 
 void eval_defaults(eval_t *ev) {
 	ev->from = gbl_current_node;
-	ev->to = gbl_len;
+	ev->to = gbl_tail_node;
 }
 	
 
@@ -585,8 +568,6 @@ eval_t * parse(char *exp, eval_t *ev) {
 	}
 }
 
-
-
 node_t * ed_append(node_t * node) {
 	char *line = NULL;
 	size_t bytes = 0;
@@ -603,14 +584,14 @@ node_t * ed_append(node_t * node) {
 	return gbl_current_node;
 }
 
-node_t * ed_delete(node_t *from, int to) {
-	for (int i = 0; i < to; ++i) {
+node_t *ed_delete(node_t *from, node_t *to) {
+	while (from != to) {
 		from = ll_remove_node(from);
 	}
 	return from;
 }
 
-node_t * ed_change(node_t *from, int to) {
+node_t * ed_change(node_t *from, node_t *to) {
 	node_t *start = from->prev;
 	ed_delete(from, to);
 	return ed_append(start);
@@ -657,12 +638,12 @@ void ed_edit(char *filename, char *cmd, bool force) {
 		state.fromfile = false;
 		state.cmd = cmd;
 		state.filename = NULL;
-		ll_free(gbl_head_node);
+		ll_free();
 		io_load_file(fp);
 		return;
 	}
 	else if (filename != NULL) {
-		ll_free(gbl_head_node);
+		ll_free();
 		state.filename = filename;
 		ed_save(state.filename, NULL, 0, 0);
 		io_load_file(fileopen(filename, "r"));
@@ -781,7 +762,10 @@ void eval(eval_t *ev) {
 			ed_save(ev->rest, NULL, 0, 1);
 			break;
 		case 'p':
-			ed_print(ev->from, ev->to);
+			ed_print(ev->from, ev->to, false);
+			break;
+		case 'n':
+			ed_print(ev->from, ev->to, true);
 			break;
 		case '!':
 			ed_shell(ev->rest, true);
@@ -977,7 +961,7 @@ char *strrep(char *str, regex_t *rep, char *with, bool matchall) {
 
 
 // :s /do[gj]/ "mein papa" g|N
-void ed_subs(node_t *from, int to, char *regex, char *rest) {
+void ed_subs(node_t *from, node_t *to, char *regex, char *rest) {
 	char *flagstr;
 	char *srest = rest;
 	if (rest[0] == '"') {
@@ -1002,18 +986,18 @@ void ed_subs(node_t *from, int to, char *regex, char *rest) {
 		io_reg_err(&reg, ret);
 	}
 
-	while (to > 0 && from != NULL) {
+	while (from != to) {
 		from->s = strrep(from->s, &reg, srest, flag);
 		from = from->next;
-		to--;
 	}
 }
 
-void ed_print(node_t *from, int to) {
-	while (to > 0 && from != NULL) {
-		printf("%s", from->s);
+void ed_print(node_t *from, node_t *to, bool numbrd) {
+	char buf[20];
+	for (int i = 1; from != to; ++i) {
+		sprintf(buf, "%d%c", i, '\t');
+		printf("%s%s", (numbrd)?buf:"", from->s);
 		from = from->next;
-		to--;
 	}
 	gbl_current_node = (from) ? from : gbl_tail_node;
 }
@@ -1042,8 +1026,9 @@ char *strcata(char *dest, char *src) {
 	return --dest;
 }
 
-void ed_join(node_t *from, int to) {
+void ed_join(node_t *from, node_t *to) {
 	/* pass 1 */
+	/*
 	int retnarr[to];
 	int retnsz = 0;
 	node_t *sfrom = from;
@@ -1060,6 +1045,7 @@ void ed_join(node_t *from, int to) {
 		strncat(sfrom->s, nxt->s, retnarr[i]-1);
 		nxt = ll_remove_node(nxt);
 	}
+	*/
 }
 
 void io_err(const char *fmt, ...) {
