@@ -76,6 +76,9 @@ node_t *gbl_tail_node;
 node_t *gbl_current_node;
 long gbl_current_ptr;
 
+#define set_gbl_head(node) ( gbl_head_node = node )
+#define set_gbl_tail(node) ( gbl_tail_node = node )
+#define set_gbl_current(node) ( gbl_current_node = node )
 
 struct {
 	char *filename;
@@ -87,20 +90,26 @@ struct {
 /* Mark array */
 node_t *gbl_marks[MARKLIM];
 
-/** List **/
-node_t *ll_add(node_t *head, char *s, int at);
+/* List manipulation (ll_ prefix stands for linked list) */
 node_t *ll_add_begin(const char *s);
 node_t *ll_add_end(const char *s);
-node_t *ll_remove(node_t *head, int at);
-node_t *ll_new_node(char *s);
+node_t *ll_add_node(node_t *node, const char *s);
+
+node_t *ll_remove_begin();
+node_t *ll_remove_end();
+node_t *ll_remove_node(node_t *node);
+
 node_t * ll_at(int at);
-void ll_free_node(node_t **node);
 node_t * ll_prev_node(node_t *node, int n);
 node_t * ll_next_node(node_t *node, int n);
-/* For debugging */
-void ll_print(node_t *head); 
-node_t *ll_add_node(node_t *node, const char *s);
+
+/* Return a node with `p` as its ->prev and `n` as its ->next */
 node_t *ll_make_node(node_t *p, const char *s, node_t *n);
+
+void ll_free_node(node_t **node); /* Free a node in the list */
+void ll_free(); /* Free the entire list */
+
+void ll_print(node_t *head);	/* For debugging mainly */
 
 /* parse routines & eval routines */
 eval_t * parse(char *exp, eval_t *ev);
@@ -199,46 +208,71 @@ node_t *ll_add_end(const char *s) {
 	return newnode;
 }
 
-node_t *ll_remove(node_t *head, int at) {
+node_t *ll_add_node(node_t *node, const char *s) {
 	state.saved = false;
-	node_t *rmnode;
-	if (at == 0) {
-		rmnode = gbl_head_node;
-		gbl_head_node = gbl_head_node->next;
-		gbl_head_node->prev = NULL;
-		gbl_current_node = gbl_head_node;
-		gbl_current_ptr = 0;
-		ll_free_node(&rmnode);
-		gbl_len--;
-		return gbl_head_node;
+
+	node_t * newnode;
+	if (node == gbl_head_node) {
+		return ll_add_begin(s);
 	}
-	else if (at == gbl_len) {
-		rmnode = gbl_tail_node;
-		gbl_tail_node = gbl_tail_node->prev;
-		gbl_tail_node->next = NULL;
-		gbl_current_node = gbl_tail_node;
-		ll_free_node(&rmnode);
-		gbl_len--;
-		gbl_current_ptr = gbl_len;
-		return gbl_tail_node;
+	else if (node == gbl_tail_node) {
+		return ll_add_end(s);
 	}
-	else if (at > 0 && at < gbl_len) {
-		node_t * current = head;
-		for (int i = 0; current->next != NULL; ++i, current = current->next) {
-			if (i == at) {
-				node_t *back = current->prev;
-				node_t *front = current->next;
-				back->next = current->next;
-				front->prev = back;
-				ll_free_node(&current);
-				gbl_len--;
-				gbl_current_ptr = i;
-				return front;
-			}
-		}
+	else {
+		node_t *prv = node->prev;
+		newnode = ll_make_node(prv, s, node);
+		prv->next = newnode;
+		node->prev = newnode;	
+		gbl_len++;
+		gbl_current_node = newnode;
+		return newnode->next;
 	}
-	die(__FILE__, __LINE__, "ll_remove", "Index Out of Range");
-	return NULL;
+}
+
+node_t *ll_remove_begin() {
+	state.saved = false;
+	if (!gbl_head_node) {
+		io_err("ll_remove_begin: Head empty; can't remove");
+	}
+	
+	node_t *rmnode = gbl_head_node;
+	set_gbl_head(gbl_head_node->next);
+	ll_free_node(&rmnode);
+	set_gbl_current(gbl_head_node);
+	return gbl_head_node;
+}
+
+node_t *ll_remove_end() {
+	state.saved = false;
+	if (!gbl_tail_node) {
+		io_err("ll_remove_end: Tail empty; can't remove");
+	}
+
+	node_t *rmnode = gbl_tail_node;
+	set_gbl_tail(gbl_tail_node->prev);
+	ll_free_node(&rmnode);
+	set_gbl_current(gbl_tail_node);
+	return gbl_tail_node;
+}
+
+node_t * ll_remove_node(node_t * node) {
+	state.saved = false;
+	if (node == gbl_head_node) {
+		return ll_remove_begin();
+	}
+	else if (node == gbl_tail_node) {
+		return ll_remove_end();
+	}
+	else {
+		node_t *back = node->prev;
+		node_t *front = node->next;
+		front->prev = back;
+		back->next = front;
+		set_gbl_current(front);
+		gbl_len++;
+		ll_free_node(&node);
+		return front;
+	}
 }
 
 node_t * ll_at(int at) {
@@ -264,41 +298,8 @@ int ll_at_i(node_t *node) {
 	return -1;
 }
 
-node_t * ll_remove_node(node_t * node) {
-	state.saved = false;
-	if (node == gbl_head_node) {
-		gbl_head_node = node->next;
-		gbl_head_node->prev = NULL;
-		gbl_len++;
-		gbl_current_node = 0;
-		ll_free_node(&node);
-		return gbl_head_node;
-	}
-	else if (node == gbl_tail_node) {
-		gbl_tail_node = node->prev;
-		gbl_tail_node->next = NULL;
-		gbl_len++;
-		gbl_current_ptr = gbl_len;
-		ll_free_node(&node);
-		return gbl_tail_node;
-	}
-	else {
-		node_t *back = node->prev;
-		node_t *front = node->next;
-		gbl_current_node = front;
-		front->prev = back;
-		back->next = front;
-		gbl_current_ptr = ll_at_i(front);
-		gbl_len++;
-		ll_free_node(&node);
-		return front;
-	}
-	return NULL;
-}
-
-
-void ll_free(node_t *head) {
-	node_t *current = head;
+void ll_free() {
+	node_t *current = gbl_head_node;
 	while (current != NULL) {
 		node_t *rmnode = current;
 		current = current->next;
@@ -678,26 +679,6 @@ node_t *ll_link_node(node_t *p, node_t *c, node_t *n) {
 }
 	
 
-node_t *ll_add_node(node_t *node, const char *s) {
-	state.saved = false;
-
-	node_t * newnode;
-	if (node == gbl_head_node) {
-		return ll_add_begin(s);
-	}
-	else if (node == gbl_tail_node) {
-		return ll_add_end(s);
-	}
-	else {
-		node_t *prv = node->prev;
-		newnode = ll_make_node(prv, s, node);
-		prv->next = newnode;
-		node->prev = newnode;	
-		gbl_len++;
-		gbl_current_node = newnode;
-		return newnode->next;
-	}
-}
 
 
 void ed_save(char *filename, char *cmd, bool quit, bool append) {
@@ -1090,10 +1071,6 @@ void io_err(const char *fmt, ...) {
 	return;
 }
 
-void clean() {
-	ll_free(gbl_head_node);
-}
-
 void repl() {
 	char *line = NULL;
 	eval_t ev;
@@ -1105,7 +1082,7 @@ void repl() {
 }
 
 int main (/*int argc, char *argv[]*/) {
-	atexit(clean);
+	atexit(ll_free);
 	io_load_file(fileopen("file.txt", "r"));
 	repl();	
 }

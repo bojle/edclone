@@ -1,1 +1,1 @@
-A clone of the `ed` text editor. Partially implemented.
+A clone of the `ed` text editor. Partially implemented. 
