@@ -407,8 +407,8 @@ void die(char *file, int line, char *fn, char *cause) {
 	exit(EXIT_FAILURE);
 }
 
-const char *commandchars = "acdeEgijklmnpqQrsw!=#t";
-const char *addressbasedcommands = "acdgijklmnpqQrs=#t";
+const char *commandchars = "acdeEgijklmnpqQrsw!=#";
+const char *addressbasedcommands = "acdgijklmnpqQrs=#";
 const char *filebasedcommands = "eEw!";
 
 char *skipspaces(char *s) {
@@ -910,7 +910,7 @@ int rep_substr_sz(char *substr, int *substrsizes, int totalreps) {
 char *strrep(char *str, regex_t *rep, char *with, bool matchall) {
 	/* Replacement happens in two passes over `str`
 	 * first pass: mark what has to be replaced
-	 * second pass: to replace
+	 * second pass: replace
 	 */
 
 	int strsz = strlen(str);
@@ -972,7 +972,7 @@ char *strrep(char *str, regex_t *rep, char *with, bool matchall) {
 
 
 
-// :s /do[gj]/ "mein papa" g|N
+// :s 1,4 /do[gj]/ "replace string" g|N
 void ed_subs(node_t *from, node_t *to, char *regex, char *rest) {
 	char *flagstr;
 	char *srest = rest;
@@ -1005,6 +1005,7 @@ void ed_subs(node_t *from, node_t *to, char *regex, char *rest) {
 }
 
 void ed_print(node_t *from, node_t *to) {
+	fflush(stdout);
 	while (from != to) {
 		printf("%s", from->s);
 		from = from->next;
