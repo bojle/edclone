@@ -10,10 +10,10 @@
 
 
 /* COMMANDS:
- * a append at a range
- * c change a range
- * d delete a range
- * e open a file
+ * a append at a range 5a
+ * c change a range 1,4c
+ * d delete a range 4,9d
+ * e open a file: e file.txt| !ls -l
  * E edit unconditionally
  * g global /RE/command-list
  * i append before
@@ -107,16 +107,16 @@ void ll_free(); /* Free the entire list */
 void ll_print(node_t *head);	/* For debugging mainly */
 
 /* parse routines & eval routines */
-eval_t * parse(char *exp, eval_t *ev);
+eval_t *parse(eval_t *ev, char *exp);
 char *skipspaces(char *s);
-eval_t *parse_address(eval_t *ev, char *addr);
+char *parse_address(eval_t *ev, char *addr);
 
-void ed_save(char *filename, char *cmd, bool quit, bool append);
+void ed_save(const char *filename, const char *cmd, bool quit, bool append);
 void ed_quit(bool force);
-void ed_subs(node_t *from, node_t *to, char *regex, char *rest);
+void ed_subs(node_t *from, node_t *to, const char *regex, char *rest);
 void ed_print(node_t *from, node_t *to);
 void ed_printn(node_t *from, node_t *to);
-void ed_read(char *filename, char *cmd, node_t *from);
+void ed_read(const char *filename, const char *cmd, node_t *from);
 void ed_join(node_t *from, node_t *to);
 node_t *ed_delete(node_t *from, node_t *to);
 void ed_equals(node_t *from);
@@ -125,9 +125,10 @@ void ed_hash(node_t *from);
 void die(char *file, int line, char *fn, char *cause);
 void io_err(const char *fmt, ...);
 node_t * io_load_file(FILE *fp);
-int io_write_file(node_t *head, char *filename, char *mode);
+int io_write_file(node_t *head, const char *filename, char *mode);
 void io_reg_err(regex_t *regcmp, int errcode);
-FILE *fileopen(char *filename, char *mode);
+FILE *fileopen(const char *filename, const char *mode);
+ssize_t get_line(char **line, size_t *linecap, FILE *fp);
 
 int markset(node_t *node, int at);
 node_t *markget(int at);
@@ -164,9 +165,15 @@ void ll_free_node(node_t **node) {
 }
 
 node_t *ll_make_node(node_t *p, const char *s, node_t *n) {
-	node_t *node = calloc(1, sizeof(node_t));
+	node_t *node; 
+	if (!(node = calloc(1, sizeof(node_t)))) {
+		io_err("calloc: %s", strerror(errno));
+	}
 	size_t sz = strlen(s);
-	node->s = calloc(sz, sizeof(char));
+	if (!(node->s = calloc(sz, sizeof(char)))) {
+		ll_free_node(&node);
+		io_err("calloc: %s", strerror(errno));
+	}
 	strncpy(node->s, s, sz);
 	node->next = n;
 	node->prev = p;
@@ -337,7 +344,7 @@ void io_reg_err(regex_t *regcmp, int errcode) {
 	longjmp(torepl, 1);
 }
 
-FILE *fileopen(char *filename, char *mode) {
+FILE *fileopen(const char *filename, const char *mode) {
 	FILE *fp;
 	if ((fp = fopen(filename, mode)) == NULL) {
 		perror("fopen");
@@ -369,7 +376,7 @@ node_t * io_load_file(FILE *fp) {
 	return head;
 }
 
-int io_write_file(node_t *head, char *filename, char *mode) {
+int io_write_file(node_t *head, const char *filename, char *mode) {
 	FILE *fp = fileopen(filename, mode);
 
 	size_t lines = 0;
@@ -393,8 +400,11 @@ char *io_read_line(char *prompt) {
 	if (prompt != NULL) {
 		printf("%s", prompt);
 	}
-	if (getdelim(&line, &linecap, '\n', stdin) != -1)
+	ssize_t n = 0;
+	if ((n = getline(&line, &linecap, stdin)) != -1) {
+		line[n-1] = '\0'; // remove newline at the end
 		return line;
+	}
 	return NULL;
 }
 
@@ -427,16 +437,7 @@ char *nextword(char *s) {
 	return s;
 }
 
-int iscommand(char * cmd) {
-	char *start = cmd;
-	//while (! isspace(*cmd)) {
-	//	cmd++;
-	//}
-	if ( /*((cmd - start) == 1) &&*/ strchr(commandchars, *start)) {
-		return 1;
-	}
-	return 0;
-}
+#define iscommand(cmd) (strchr(commandchars, cmd))
 
 char *rmnewline(char *s) {
 	char *start = s;
@@ -446,20 +447,17 @@ char *rmnewline(char *s) {
 	return start;
 }
 
-eval_t *parse_address(eval_t *ev, char *addr) {
-	char *naddr = addr;
-	if (*naddr == '"') {
-		naddr++;
-		while (*naddr != '"') { naddr++; }
-	}
-	else {
-		while (! isspace(*naddr) && *naddr != '\0') { naddr++; }
-	}
-	
-	int size = naddr - addr;
+int isaddresschar(char *a) {
+	if (*a == '-' || *a == '+' || *a == '$' ||
+		*a == '.' || *a == ',' || isdigit(*a) ||
+		(isalpha(*a) && *(a-1) == '\''))
+		return 1;
+	return 0;
+}
 
+char *parse_address(eval_t *ev, char *addr) {
 	bool commapassed = false;
-	while (addr < naddr) {
+	while (isaddresschar(addr)) {
 		if (*addr == '.') {
 			if (commapassed) { ev->to = gbl_current_node; }
 			else { ev->from = gbl_current_node; }
@@ -469,13 +467,7 @@ eval_t *parse_address(eval_t *ev, char *addr) {
 			else { ev->from = gbl_tail_node; }
 		}
 		else if (*addr == ',') {
-			if (size == 1) {
-				ev->from = gbl_head_node;
-				ev->to = gbl_tail_node;
-			}
-			else {
-				commapassed = true;
-			}
+			commapassed = true;
 		}
 		else if (*addr == '-') {
 			long num = 1;
@@ -536,39 +528,40 @@ eval_t *parse_address(eval_t *ev, char *addr) {
 		}
 		addr++;
 	}
-	return ev;
+	return addr;
 }
 
-void eval_defaults(eval_t *ev) {
-	ev->from = gbl_current_node;
-	ev->to = NULL;
+char *parse_rest(eval_t *ev, char *exp) {
+	while (*exp) {
+		if (*exp == '/') {
+			char *start = ++exp;
+			while (*exp != '/' && *(exp-1) != '\\') {
+				exp++;
+			}
+			*exp = '\0';
+			ev->regex = start;
+			return skipspaces(exp+1);
+		}
+		exp++;
+	}
+	return skipspaces(exp);
 }
-	
 
-eval_t * parse(char *exp, eval_t *ev) {
+
+#define eval_defaults(ev) \
+	ev->from = gbl_current_node;\
+   	ev->to = NULL;
+
+eval_t *parse(eval_t *ev, char *exp) {
 	eval_defaults(ev);
-	exp = rmnewline(exp);
-	exp = skipspaces(exp);
-	char *address = nextword(exp);
-	char *rest = nextword(address);
+	exp = parse_address(ev, exp);
+	ev->cmd = *exp++;
+	ev->rest = parse_rest(ev, exp);
 
-	if (iscommand(exp)) {
-		ev->cmd = exp[0];
-		if (strchr(addressbasedcommands, exp[0])) {
-			parse_address(ev, address);
-			ev->rest = rest;
-		}
-		else if (strchr(filebasedcommands, exp[0])) {
-			ev->rest = address;
-		}
-		if (ev->to)
-			ev->to = ev->to->next;
-		return ev;
-	}
-	else {
+	if (!iscommand(ev->cmd)) {
 		io_err("Unknown command: %s\n", exp);
-		return NULL; // Never reached
 	}
+	return ev;
 }
 
 node_t * ed_append(node_t * node) {
@@ -664,7 +657,7 @@ node_t *ll_link_node(node_t *p, node_t *c, node_t *n) {
 
 
 
-void ed_save(char *filename, char *cmd, bool quit, bool append) {
+void ed_save(const char *filename, const char *cmd, bool quit, bool append) {
 	state.saved = true;	
 	if (filename != NULL) {
 		io_write_file(gbl_head_node, filename,(append)? "a":"w" );
@@ -720,7 +713,7 @@ node_t * ed_move(node_t *from, int to, node_t *at) {
 void ed_quit(bool force) {
 	if (!force) {
 		if (!state.saved) {
-			fprintf(stderr, "Unsaved Progress\n");
+			fprintf(stderr, "No write since last change\n");
 			return;
 		}
 	}
@@ -729,7 +722,6 @@ void ed_quit(bool force) {
 
 
 void eval(eval_t *ev) {
-	char *tmp;
 	switch(ev->cmd) {
 		case 'a':
 			ed_append(ev->from);
@@ -779,9 +771,7 @@ void eval(eval_t *ev) {
 			ed_quit(true);
 			break;
 		case 's':
-			tmp = nextword(ev->rest);
-			parse_address(ev, ev->rest);
-			ed_subs(ev->from, ev->to, ev->regex, tmp);
+			ed_subs(ev->from, ev->to, ev->regex, ev->rest);
 			break;
 		case 'k':
 			ed_mark(ev->from, ev->rest[0]);
@@ -838,16 +828,20 @@ char *strncata(char *dest, char *src, int n) {
 	return dest;
 }
 
-char * regcat(char *dest, char *with, char *repstring, int *witharr) {
+/*
+ * `with` contains strings that may contain '&'s, which are placeholders
+ * for mathced strings (see manual).
+ * regcat() cats `dest` and `with` with '&'s in `with` replaced by `repstring`
+ */
+char * regcat(char *dest, char *with, char *repstring, int *substrsizes) {
 	while (*dest) dest++;
 
-	int witharri = 0;
-	while(*with) {
+	for (int i = 0; *with; ) {
 		if (*with == '&') {
 			if (*(with-1) != '\\') {
-				dest = strncata(dest, repstring, witharr[witharri]);
+				dest = strncata(dest, repstring, substrsizes[i]);
 				with++;
-				witharri++;
+				i++;
 				continue;
 			}
 			else {
@@ -950,7 +944,11 @@ char *strrep(char *str, regex_t *rep, char *with, bool matchall) {
 
 	/* retn will be the replaced string and retnsz its size */
 	int retnsz = strsz + (repsubstrsz - repsum);
-	char *retn = calloc(retnsz, sizeof(*retn));
+	char *retn; 
+	if (!(retn = calloc(retnsz, sizeof(*retn)))) {
+		io_err("calloc: %s", strerror(errno));
+	}
+
 	char *sretn = retn;
 
 	/* pass 2 */
@@ -973,23 +971,15 @@ char *strrep(char *str, regex_t *rep, char *with, bool matchall) {
 
 
 // :s 1,4 /do[gj]/ "replace string" g|N
-void ed_subs(node_t *from, node_t *to, char *regex, char *rest) {
-	char *flagstr;
+void ed_subs(node_t *from, node_t *to, const char *regex, char *rest) {
 	char *srest = rest;
-	if (rest[0] == '"') {
-		srest = rest = rest + 1;
-		while (*rest != '"')
-			rest++;
+	while (*rest != '/') { 
+		rest++; 
 	}
-	else {
-		while (!isspace(*rest))
-			rest++;
-	}
-	*rest = '\0';
-	flagstr = skipspaces(rest+1);
-	
+	*rest = '\0'; rest++;
+	rest = skipspaces(rest);
 	bool flag = false;
-	if (*flagstr == 'g')
+	if (*rest == 'g')
 		flag = true;
 
 	regex_t reg;
@@ -1027,7 +1017,7 @@ void ed_mark(node_t *node, int mark) {
 	printf("Mark set at \"%c\"", mark);
 }
 
-void ed_read(char *filename, char *cmd, node_t *from) {
+void ed_read(const char *filename, const char *cmd, node_t *from) {
 	FILE *fp;
 	fp = (filename)? fileopen(filename, "r"): popen(cmd, "r");
 
@@ -1100,7 +1090,7 @@ void repl() {
 	eval_t ev;
 	setjmp(torepl);
 	while ((line = io_read_line(EDPROMPT)) != NULL) {
-		eval(parse(line, &ev));
+		eval(parse(&ev, line));
 	}
 	free(line);
 }

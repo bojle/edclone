@@ -1,5 +1,5 @@
 CC=gcc
-FLAGS=-Wall -pedantic -Wextra -pg
+FLAGS=-Wall -pedantic -Wextra -g
 LDLIBS=
 EXE=d
 
