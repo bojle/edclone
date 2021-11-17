@@ -2,10 +2,12 @@
 #include <stdarg.h>
 #include <regex.h>
 #include <ctype.h>
+#include <sys/stat.h>
 #include <string.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <setjmp.h>
 
 
@@ -35,12 +37,6 @@
 /* Max replacements in a string */
 #define REPLIM 200
 
-/* 
- * Maximum marks 
- * From '!' (dec 33) to '~' (dec 126)
- * 126 - 33 = 93
- */
-#define MARKLIM 93 
 
 jmp_buf torepl;
 
@@ -57,7 +53,7 @@ typedef struct regbuf {
 
 
 /* struct accepted by eval().
- * returned by parse()
+ * filled and returned by parse()
  */
 typedef struct {
 	char cmd;
@@ -68,9 +64,12 @@ typedef struct {
 	char *regex;	
 }eval_t;
 
-/* length of the global list */
-long gbl_len;
+/* The central data structure is a linked list.
+ * Only one list exists in the memory at a time,
+ * this list is accessed through these global variables
+ */
 
+uint32_t gbl_len;
 node_t *gbl_head_node;
 node_t *gbl_tail_node;
 node_t *gbl_current_node;
@@ -82,12 +81,24 @@ struct {
 	bool fromfile;
 }state;
 
+/* 
+ * Maximum [book]marks 
+ * From '!' (dec 33) to '~' (dec 126)
+ * 126 - 33 = 93
+ */
+#define MARKLIM 93 
+
 /* Mark array */
 node_t *gbl_marks[MARKLIM];
+
+const char *commandchars = "acdeEgijklmnpqQrsw!=#t";
+const char *addressbasedcommands = "acdgijklmnpqQrs=#";
+const char *filebasedcommands = "eEw!";
 
 /* List manipulation (ll_ prefix stands for linked list) */
 node_t *ll_add_begin(const char *s);
 node_t *ll_add_end(const char *s);
+/* add `s` after `node` */
 node_t *ll_add_node(node_t *node, const char *s);
 
 node_t *ll_remove_begin();
@@ -106,10 +117,18 @@ void ll_free(); /* Free the entire list */
 
 void ll_print(node_t *head);	/* For debugging mainly */
 
-/* parse routines & eval routines */
+/* parse & eval routines */
 eval_t *parse(eval_t *ev, char *exp);
-char *skipspaces(char *s);
+ /* returns when it encounters a command character. */
 char *parse_address(eval_t *ev, char *addr);
+/* parse the expression after the command character */
+char *parse_rest(eval_t *ev, char *exp);
+/* fails when `a` points to a non-address i.e. a command character */
+int isaddresschar(char *a);
+/* returns when it encounters a non-space character */
+char *skipspaces(char *s);
+#define iscommand(cmd) (strchr(commandchars, cmd))
+void eval(eval_t *ev);
 
 void ed_save(const char *filename, const char *cmd, bool quit, bool append);
 void ed_quit(bool force);
@@ -122,12 +141,23 @@ node_t *ed_delete(node_t *from, node_t *to);
 void ed_equals(node_t *from);
 void ed_hash(node_t *from);
 
-void die(char *file, int line, char *fn, char *cause);
+void die(char *fn, char *cause);
+/* longjmp() to repl() */
 void io_err(const char *fmt, ...);
-node_t * io_load_file(FILE *fp);
-int io_write_file(node_t *head, const char *filename, char *mode);
+/* loads a file into a linked list, returns its head */
+node_t *io_load_file(FILE *fp);
+int io_write_file(node_t *head, char *filename, char *mode);
 void io_reg_err(regex_t *regcmp, int errcode);
-FILE *fileopen(const char *filename, const char *mode);
+
+/* return a dynamically allocated string read from stdin
+ * prompt can be a string or NULL
+ */
+char *io_read_line(const char *prompt);
+
+/* fileopen is fopen with error checking
+ * mode: "r", "w", "w+" etc. 
+ */
+FILE *fileopen(char *filename, const char *mode);
 ssize_t get_line(char **line, size_t *linecap, FILE *fp);
 
 int markset(node_t *node, int at);
@@ -160,6 +190,7 @@ void ll_print(node_t *head) {
 }
 
 void ll_free_node(node_t **node) {
+	free((*node)->s);
 	free(*node);
 	(*node) = NULL;
 }
@@ -185,16 +216,16 @@ node_t *ll_add_begin(const char *s) {
 	node_t *newnode;
 	if (!gbl_head_node) {
  		newnode = ll_make_node(NULL, s, NULL);
-		gbl_head_node = gbl_tail_node = gbl_current_node = newnode;
+		gbl_head_node = gbl_current_node = newnode;
 	}
 	else {
 		newnode = ll_make_node(NULL, s, gbl_head_node);
-		newnode->next = gbl_head_node;
 		gbl_head_node->prev = newnode;
 		gbl_head_node = newnode;
+		gbl_current_node = gbl_head_node;
 	}
 	gbl_len++;
-	return newnode;
+	return gbl_current_node;
 }
 
 node_t *ll_add_end(const char *s) {
@@ -344,26 +375,34 @@ void io_reg_err(regex_t *regcmp, int errcode) {
 	longjmp(torepl, 1);
 }
 
-FILE *fileopen(const char *filename, const char *mode) {
-	FILE *fp;
+FILE *fileopen(char *filename, const char *mode) {
+	state.fromfile = true;
+	state.filename = filename;
+	FILE *fp = NULL;
+	struct stat st;
+	if (stat(filename, &st) == -1 && errno != ENOENT) {
+		perror("stat");
+		return NULL;
+	}
+
 	if ((fp = fopen(filename, mode)) == NULL) {
 		perror("fopen");
 		return NULL;
 	}
-	state.fromfile = true;
-	state.filename = filename;
 	return fp;
 }
 
-node_t * io_load_file(FILE *fp) {
-	state.saved = true;
+node_t *io_load_file(FILE *fp) {
+
+	if (fp == NULL)
+		goto end;
+
 	char *line = NULL;
 	size_t linecap;
 	ssize_t total_lines_read = 0;
-	node_t *head = NULL;
 
 	while ((getline(&line, &linecap, fp)) > 0) {
-		head = ll_add_end(line);
+		ll_add_end(line);
 		total_lines_read++;
 	}
 
@@ -373,10 +412,12 @@ node_t * io_load_file(FILE *fp) {
 
 	free(line);
 	fclose(fp);
-	return head;
+end:
+	state.saved = true;
+	return gbl_head_node;
 }
 
-int io_write_file(node_t *head, const char *filename, char *mode) {
+int io_write_file(node_t *head, char *filename, char *mode) {
 	FILE *fp = fileopen(filename, mode);
 
 	size_t lines = 0;
@@ -393,7 +434,7 @@ int io_write_file(node_t *head, const char *filename, char *mode) {
 	return 0;
 }
 
-char *io_read_line(char *prompt) {
+char *io_read_line(const char *prompt) {
 	char *line = NULL;
 	size_t linecap = 0;
 
@@ -408,18 +449,10 @@ char *io_read_line(char *prompt) {
 	return NULL;
 }
 
-void die(char *file, int line, char *fn, char *cause) {
-	bool nocause = false;
-	if (cause == NULL) { nocause = true; }
-
-	fprintf(stderr, "%s:%d - %s: %s\n",
-			file, line, fn, (nocause ? strerror(errno): cause));
+void die(char *fn, char *cause) {
+	fprintf(stderr,"%s: %s\n", fn, (cause)? cause: strerror(errno));
 	exit(EXIT_FAILURE);
 }
-
-const char *commandchars = "acdeEgijklmnpqQrsw!=#";
-const char *addressbasedcommands = "acdgijklmnpqQrs=#";
-const char *filebasedcommands = "eEw!";
 
 char *skipspaces(char *s) {
 	if (! isspace(*s))
@@ -437,7 +470,6 @@ char *nextword(char *s) {
 	return s;
 }
 
-#define iscommand(cmd) (strchr(commandchars, cmd))
 
 char *rmnewline(char *s) {
 	char *start = s;
@@ -450,7 +482,7 @@ char *rmnewline(char *s) {
 int isaddresschar(char *a) {
 	if (*a == '-' || *a == '+' || *a == '$' ||
 		*a == '.' || *a == ',' || isdigit(*a) ||
-		(isalpha(*a) && *(a-1) == '\''))
+		(isalpha(*a) && *(a-1) == '\'')) // apostrophe + alpha -> mark 
 		return 1;
 	return 0;
 }
@@ -467,6 +499,8 @@ char *parse_address(eval_t *ev, char *addr) {
 			else { ev->from = gbl_tail_node; }
 		}
 		else if (*addr == ',') {
+			if (!isaddresschar(addr+1))
+				ev->from = gbl_head_node;
 			commapassed = true;
 		}
 		else if (*addr == '-') {
@@ -524,7 +558,6 @@ char *parse_address(eval_t *ev, char *addr) {
 		else if (*addr == '\'') {
 			if ((ev->from = markget(*(addr+1))) == NULL) 
 				io_err("Mark not set %c\n", *(addr+1));
-
 		}
 		addr++;
 	}
@@ -532,8 +565,9 @@ char *parse_address(eval_t *ev, char *addr) {
 }
 
 char *parse_rest(eval_t *ev, char *exp) {
+	char *s = exp;
 	while (*exp) {
-		if (*exp == '/') {
+		if (*exp == '/') { // start of a regex
 			char *start = ++exp;
 			while (*exp != '/' && *(exp-1) != '\\') {
 				exp++;
@@ -544,7 +578,7 @@ char *parse_rest(eval_t *ev, char *exp) {
 		}
 		exp++;
 	}
-	return skipspaces(exp);
+	return skipspaces(s);
 }
 
 
@@ -556,15 +590,14 @@ eval_t *parse(eval_t *ev, char *exp) {
 	eval_defaults(ev);
 	exp = parse_address(ev, exp);
 	ev->cmd = *exp++;
-	ev->rest = parse_rest(ev, exp);
-
 	if (!iscommand(ev->cmd)) {
 		io_err("Unknown command: %s\n", exp);
 	}
+	ev->rest = parse_rest(ev, exp);
 	return ev;
 }
 
-node_t * ed_append(node_t * node) {
+node_t *ed_append(node_t * node) {
 	char *line = NULL;
 	size_t bytes = 0;
 	size_t lines = 0;
@@ -632,7 +665,6 @@ void ed_edit(char *filename, char *cmd, bool force) {
 		FILE *fp = ed_shell(cmd, false);
 		state.fromfile = false;
 		state.cmd = cmd;
-		state.filename = NULL;
 		ll_free();
 		io_load_file(fp);
 		return;
@@ -653,9 +685,6 @@ node_t *ll_link_node(node_t *p, node_t *c, node_t *n) {
 	p->next = c;
 	return c;
 }
-	
-
-
 
 void ed_save(const char *filename, const char *cmd, bool quit, bool append) {
 	state.saved = true;	
@@ -735,11 +764,11 @@ void eval(eval_t *ev) {
 		case 'e':
 			if (ev->rest[0] == '!') 
 				/* ed_edit(filename, cmd, force) */
-				ed_edit(NULL, nextword(ev->rest), false);
+				ed_edit(NULL, skipspaces(ev->rest+1), false);
 			else
 				ed_edit(ev->rest, NULL, false);
 			break;
-		case 'E':
+		case 'E': // forceful edit
 			ed_edit(ev->rest, NULL, true);
 			break;
 		case 'w':
@@ -794,6 +823,8 @@ void eval(eval_t *ev) {
 		/* TODO: remove this temporary print func */
 		case 't': 
 			ll_print(gbl_head_node);
+			break;
+		case '\n':
 			break;
 		default:
 			printf("Unimplemented Command\n");
@@ -970,7 +1001,7 @@ char *strrep(char *str, regex_t *rep, char *with, bool matchall) {
 
 
 
-// :s 1,4 /do[gj]/ "replace string" g|N
+/* :(.,.)s/^regx$/replace/g */
 void ed_subs(node_t *from, node_t *to, const char *regex, char *rest) {
 	char *srest = rest;
 	while (*rest != '/') { 
@@ -1026,6 +1057,8 @@ void ed_read(const char *filename, const char *cmd, node_t *from) {
 	while (getline(&line, &linecap, fp) > 0) {
 		from = ll_add_node(from, line);
 	}
+
+	(filename)? fclose(fp): pclose(fp);
 }
 
 char *strcata(char *dest, char *src) {
@@ -1107,6 +1140,10 @@ int main (int argc, char *argv[]) {
 		exit(EXIT_FAILURE);
 	}
 	atexit(ll_free);
-	io_load_file(fileopen(argv[1], "r"));
+	FILE *fp = NULL;
+	if ((fp = fileopen(argv[1], "r")) == NULL && errno != ENOENT) {
+		die("fileopen", NULL);
+	}
+	io_load_file(fp);
 	repl();	
 }
