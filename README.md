@@ -1,3 +1,3 @@
 A clone of the `ed` text editor. Partially implemented. 
 
-**ABANDONED** for most part.
+**ABANDONED**, see [edd](https://github.com/bojle/edd.git).
